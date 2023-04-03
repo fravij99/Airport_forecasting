@@ -9,12 +9,14 @@ import os
 from datetime import datetime
 import random
 from hyperopt import fmin, tpe, hp, Trials, space_eval, STATUS_OK
-
+from plot_keras_history import plot_history, show_history
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 
 mpl.rcParams['figure.figsize'] = (8, 6)
 mpl.rcParams['axes.grid'] = False
+from tensorflow.python.ops.numpy_ops import np_config
+np_config.enable_numpy_behavior()
 
 def direction_to_angle(direction, wind_dirs, angle_list):
     """
@@ -220,11 +222,12 @@ class WindowGenerator:
 
         return result
 
-    def plot_renormalized(self, train_mean, train_std, model=None, plot_col='Temperature', max_subplots=3):
+    def plot_renormalized(self, train_mean, train_std, model, plot_col='Temperature', max_subplots=3):
 
         a = list(np.arange(5, 65, 5))
         str_list = ['+'+str(i) for i in a]
         inputs, labels = self.example
+
         plt.figure(figsize=(12, 8))
         plot_col_index = self.column_indices[plot_col]
         max_n = min(max_subplots, len(inputs))
@@ -243,17 +246,26 @@ class WindowGenerator:
             if label_col_index is None:
                 continue
 
+
             plt.plot(self.label_indices, ((
-                labels[n, :, label_col_index]*train_std[0])+train_mean[0]), '-', c='#2ca02c')
+                labels[n, :, label_col_index]*train_std[1])+train_mean[1]), '-', c='#2ca02c')
             plt.scatter(self.label_indices, ((
-                labels[n, :, label_col_index]*train_std[0])+train_mean[0]), edgecolors='k', label='Labels', c='#2ca02c', s=64)
+                labels[n, :, label_col_index]*train_std[1])+train_mean[1]), edgecolors='k', label='Labels', c='#2ca02c', s=64)
 
             if model is not None:
                 predictions = model.predict(inputs)
+                predictions[n].reshape(12)
+
+
+            #if (np.array(predictions[n+1, :, label_col_index]== predictions[n+2, :, label_col_index])).all:
+             #   message = "First value and second value are equal!"
+              #  print(message)
+               # return -1
+
 
             plt.plot(self.label_indices, ((
-                predictions[n, :, label_col_index]*train_std[0])+train_mean[0]), '-', c='#ff7f0e', ms=1)
-            plt.scatter(self.label_indices, ((predictions[n, :, label_col_index]*train_std[0])+train_mean[0]), marker='X', edgecolors='k', label='Predictions',
+                predictions[n]*train_std[1])+train_mean[1]), '-', c='#ff7f0e', ms=1)
+            plt.scatter(self.label_indices, ((predictions[n]*train_std[1])+train_mean[1]), marker='X', edgecolors='k', label='Predictions',
                         c='#ff7f0e', s=64)
 
             if n == 0:
@@ -264,7 +276,9 @@ class WindowGenerator:
 
         plt.xlabel('minutes into the future')
         plt.show()
-
+        print('difference averege for every window in °C: ', np.absolute(np.array(predictions[0]-labels[0])).mean()*train_std[1],
+                                                             np.absolute(np.array(predictions[1]-labels[1])).mean()*train_std[1],
+                                                             np.absolute(np.array(predictions[2]-labels[2])).mean()*train_std[1])
 class Model():
 
 
@@ -343,21 +357,23 @@ class Model():
 
             self.load_pretrained_model()
 
-    def advanced_model(self, OUT_STEPS, num_features_predicted, model_name, layer_number, layer_size, LoadModel=False):
+    def advanced_model(self, OUT_STEPS, num_features_predicted, model_name, conv_number, layer_number, layer_size, LoadModel=False):
 
         model = tf.keras.models.Sequential()
-        model.add(tf.keras.layers.Conv1D(
-                64, kernel_size=6, activation='relu'))
-        model.add(tf.keras.layers.MaxPooling1D(2)),
-        model.add(tf.keras.layers.Conv1D(32, kernel_size=3, activation='relu'))
-        model.add(tf.keras.layers.MaxPooling1D(2))
+
+
+        for i in range(conv_number):
+            model.add(tf.keras.layers.Conv1D(int(64/(2**i)), kernel_size=int(6/(2**i)), activation='relu'))
+            model.add(tf.keras.layers.MaxPooling1D(2))
         for i in range(layer_number):
-            model.add(tf.keras.layers.LSTM(layer_size, activation='tanh',
-                                 return_sequences=False))
+            model.add(tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(int(layer_size/(2^i)), activation='tanh',
+                                 return_sequences=True)))
+            model.add(tf.keras.layers.Dropout(0.2))
+
         model.add(tf.keras.layers.Flatten())
-        model.add(tf.keras.layers.Dropout(0.3))
+        model.add(tf.keras.layers.Dropout(0.2))
         model.add(tf.keras.layers.Dense(64))
-        model.add(tf.keras.layers.Dropout(0.3))
+        model.add(tf.keras.layers.Dropout(0.2))
         model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted))
         model.add(tf.keras.layers.Reshape([OUT_STEPS,num_features_predicted]))
 
@@ -397,10 +413,10 @@ class Model():
 
             # Take the last time step.
             # Shape [batch, time, features] => [batch, 1, features]
-
-        model.add(tf.keras.layers.Lambda(lambda x: x[:, -1:, :]))
-            # Shape => [batch, 1, dense_units]
         for i in range(layer_number):
+            model.add(tf.keras.layers.Lambda(lambda x: x[:, -1:, :]))
+            # Shape => [batch, 1, dense_units]
+        
             model.add(tf.keras.layers.Dense(layer_size, activation='tanh'))
             # Shape => [batch, out_steps*features]
             model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted,
@@ -489,7 +505,7 @@ class Model():
 
             history = self.model.fit(self.window.train, epochs=epochs,
                                      validation_data=self.window.val,
-                                     callbacks=callbacks)
+                                     callbacks=callbacks, batch_size=32)
 
         self.multi_val_performance[self.model_name] = self.model.evaluate(self.window.val)
         self.multi_performance[self.model_name] = self.model.evaluate(self.window.test, verbose=0)
@@ -552,7 +568,7 @@ class Model():
             history_cnn = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                    epochs=MAX_EPOCHS,
                                                    patience=5)
-        # plot_history(history_cnn)
+        #plot_history(history_cnn)
         # multi_window.plot_renormalized(
         # model=model, train_mean=train_mean, train_std=train_std)
         if parameters['model'] == 'bidirectional_lstm':
@@ -571,7 +587,7 @@ class Model():
 
             history_birirectional_lstm = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True, epochs=MAX_EPOCHS, patience=5)
 
-            # plot_history(history_birirectional_lstm)
+            plot_history(history_birirectional_lstm)
             # multi_window.plot_renormalized(model=model, train_mean=train_mean, train_std=train_std)
 
         if parameters['model'] == 'multilinear':
@@ -584,16 +600,18 @@ class Model():
             history_multilinear = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                            epochs=MAX_EPOCHS,
                                                            patience=5)
+            plot_history(history_multilinear)
         if parameters['model'] == 'advanced_model':
             
 
-            self.multi_linear(self.OUT_STEPS, self.num_features_predicted, model_name='advanced_model', 
+            self.advanced_model(self.OUT_STEPS, self.num_features_predicted, model_name='advanced_model', conv_number=parameters['conv_number'],
                               layer_number=parameters['layer_number'], layer_size=parameters['layer_size'])
             print('learning rate ', parameters['lr'])                      
-            history_multilinear = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
+            history_advanced = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                            epochs=MAX_EPOCHS,
                                                            patience=5)
-        # plot_history(history_multilinear)
+            
+            plot_history(history_advanced)
         # multi_window.plot_renormalized(
         #     model=model, train_mean=train_mean, train_std=train_std)
 
@@ -608,14 +626,15 @@ class Model():
             history_dense = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                      epochs=MAX_EPOCHS,
                                                      patience=5)
-        # plot_history(history_dense)
+            plot_history(history_dense)
         # multi_window.plot_renormalized(
         # model=model, train_mean=train_mean, train_std=train_std)
 
     def loss(self, parameters):
         self.optimize_hyperparams(MAX_EPOCHS=self.max_epochs, parameters=parameters)
-        print('prova parametri', parameters['layer_size'])
-        print('prova performance', self.multi_performance[parameters['model']])
+        print('prova nodi', parameters['layer_size'])
+        print('prova conv', parameters['conv_number'])
+        print('prova layer', parameters['layer_number'])
         return {'loss': self.multi_performance[parameters['model']][0], 'status': STATUS_OK}
 
     def finding_best(self, trial, evals, parameters):

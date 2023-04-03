@@ -13,9 +13,9 @@ from hyperopt import fmin, tpe, hp, Trials, space_eval, STATUS_OK
 from predlib import direction_to_angle, WindowGenerator, Model, RepeatBaseline
 
 import matplotlib as mpl
-
+from tensorflow.python.ops.numpy_ops import np_config
+np_config.enable_numpy_behavior()
 #HPERPARAMETERS FUNCTIONS
-
 
 
 mpl.rcParams['figure.figsize'] = (8, 6)
@@ -52,6 +52,7 @@ Let's renormalize the dataset according to the train mean and std
 """
 
 train_mean = train_df.mean()
+
 train_std = train_df.std()
 
 train_df = (train_df - train_mean) / train_std
@@ -66,7 +67,7 @@ order to create an eligible piece if training-val-test data.
 
 
 MAX_EPOCHS = 1
-MAX_EVALS=50
+MAX_EVALS=1
 input_hours=24
 output_hours=1
 
@@ -83,12 +84,13 @@ multi_window = WindowGenerator(input_width=IN_STEPS,
                                test_df=test_df,
                                label_columns=prediction_labels)
 
-# multi_window.plot()
+#multi_window.plot()
 params = {
-              'layer_size':     hp.choice('layer_size', np.arange(30, 60, 3)),
-              'model':          hp.choice('model', ['advanced_model']),
-              'layer_number':   hp.choice('layer_number', np.arange(1, 3, 1)), 
-              'lr':             hp.loguniform('lr', -10, -1)
+              'layer_size':     56,
+              'model':          'multilinear',
+              'layer_number':   1,
+              'conv_number':    hp.choice('conv_number', np.arange(1, 4, 1)),
+              'lr':             0.03,
               }
 
 model1 = Model(multi_window, train_std['Temperature'], OUT_STEPS, num_features_predicted, MAX_EPOCHS)
@@ -102,4 +104,5 @@ best= model1.finding_best(trial, MAX_EVALS, params)
 print(space_eval(params, best))
 
 sns.set(style='darkgrid')
-model1.plot_opt(trial)
+#model1.plot_opt(trial)
+multi_window.plot_renormalized(model=model1, train_mean=train_mean, train_std=train_std)
