@@ -9,10 +9,11 @@ import os
 from datetime import datetime
 import random
 from hyperopt import fmin, tpe, hp, Trials, space_eval, STATUS_OK
-from plot_keras_history import plot_history, show_history
+
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-
+import scipy
+from plot_keras_history import plot_history
 mpl.rcParams['figure.figsize'] = (8, 6)
 mpl.rcParams['axes.grid'] = False
 from tensorflow.python.ops.numpy_ops import np_config
@@ -44,6 +45,7 @@ class WindowGenerator:
         self.val_df = val_df
         self.test_df = test_df
         self.batch_size=batch_size
+        self.input_width=input_width
 
         # Work out the label column indices.
         self.label_columns = label_columns
@@ -175,6 +177,7 @@ class WindowGenerator:
         """
 
         data = np.array(data, dtype=np.float32)
+        print(self.total_window_size, len(data))
         ds = tf.keras.utils.timeseries_dataset_from_array(
             data=data,
             targets=None,
@@ -222,9 +225,9 @@ class WindowGenerator:
 
         return result
 
-    def plot_renormalized(self, train_mean, train_std, model, plot_col='Temperature', max_subplots=3):
+    def plot_renormalized(self, train_mean, train_std, model, plot_col='Dew Point', max_subplots=3):
 
-        a = list(np.arange(5, 65, 5))
+        a = list(np.arange(5, self.label_width, 5))
         str_list = ['+'+str(i) for i in a]
         inputs, labels = self.example
 
@@ -248,14 +251,15 @@ class WindowGenerator:
 
 
             plt.plot(self.label_indices, ((
-                labels[n, :, label_col_index]*train_std[1])+train_mean[1]), '-', c='#2ca02c')
+                labels[n]*train_mean)), '-', c='#2ca02c')
             plt.scatter(self.label_indices, ((
-                labels[n, :, label_col_index]*train_std[1])+train_mean[1]), edgecolors='k', label='Labels', c='#2ca02c', s=64)
+                labels[n]*train_mean)), edgecolors='k', label='Labels', c='#2ca02c', s=64)
 
             if model is not None:
-                predictions = model.predict(inputs)
-                predictions[n].reshape(12)
 
+                predictions = model.predict(inputs)
+
+                pred2=tf.reshape(predictions[n], self.label_width)
 
             #if (np.array(predictions[n+1, :, label_col_index]== predictions[n+2, :, label_col_index])).all:
              #   message = "First value and second value are equal!"
@@ -264,21 +268,38 @@ class WindowGenerator:
 
 
             plt.plot(self.label_indices, ((
-                predictions[n]*train_std[1])+train_mean[1]), '-', c='#ff7f0e', ms=1)
-            plt.scatter(self.label_indices, ((predictions[n]*train_std[1])+train_mean[1]), marker='X', edgecolors='k', label='Predictions',
+                pred2*train_mean)), '-', c='#ff7f0e', ms=1)
+            plt.scatter(self.label_indices, ((pred2*train_mean)), marker='X', edgecolors='k', label='Predictions',
                         c='#ff7f0e', s=64)
 
             if n == 0:
                 plt.legend()
 
-            plt.xticks(ticks=list(np.arange(288, 288+12)), labels=str_list)
+            #plt.xticks(ticks=list(np.arange(self.input_width, self.input_width+self.label_width)), labels=str_list)
             plt.title(model.model_name)
 
         plt.xlabel('minutes into the future')
+        plt.savefig('pred.png')
         plt.show()
-        print('difference averege for every window in °C: ', np.absolute(np.array(predictions[0]-labels[0])).mean()*train_std[1],
-                                                             np.absolute(np.array(predictions[1]-labels[1])).mean()*train_std[1],
-                                                             np.absolute(np.array(predictions[2]-labels[2])).mean()*train_std[1])
+        print('difference averege for every window in °C: ', np.absolute(np.array(predictions[0]-labels[0])).mean()*train_mean,
+                                                             np.absolute(np.array(predictions[1]-labels[1])).mean()*train_mean,
+                                                             np.absolute(np.array(predictions[2]-labels[2])).mean()*train_mean)
+        
+
+                    
+
+
+    def xcross(self, vec1, vec2, index):
+        cross = scipy.signal.correlate(vec1, vec2)
+        plt.scatter(np.arange(len(cross))*5, cross, label='xcorr', c='lightblue', marker='X', edgecolors='k')
+        plt.title('cross correlation ')
+        plt.show()
+        print(cross)
+
+
+        
+
+
 class Model():
 
 
@@ -292,13 +313,13 @@ class Model():
         self.trials = {}
         self.OUT_STEPS = OUT_STEPS
         self.num_features_predicted = num_features_predicted
-
+        self.example={}
 
     def linear_lstm(self, OUT_STEPS, num_features_predicted, model_name, layer_number, layer_size, LoadModel=False):
 
         model = tf.keras.Sequential()
         for i in range(layer_number):
-            model.add((tf.keras.layers.LSTM(units = layer_size, activation='tanh', return_sequences=False)))
+            model.add((tf.keras.layers.GRU(units = layer_size, activation='tanh', return_sequences=False)))
             model.add(tf.keras.layers.Dropout(0.01))
             model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted,
                                   kernel_initializer=tf.initializers.zeros()))
@@ -363,17 +384,19 @@ class Model():
 
 
         for i in range(conv_number):
-            model.add(tf.keras.layers.Conv1D(int(64/(2**i)), kernel_size=int(6/(2**i)), activation='relu'))
+            model.add(tf.keras.layers.Conv1D(int(64/(2**i)), kernel_size=int(6), activation='relu'))
             model.add(tf.keras.layers.MaxPooling1D(2))
+            #model.add(tf.keras.layers.Dropout(0.2))
         for i in range(layer_number):
-            model.add(tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(int(layer_size/(2^i)), activation='tanh',
+            model.add(tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(int(layer_size/(2**i)), activation='tanh',
                                  return_sequences=True)))
-            model.add(tf.keras.layers.Dropout(0.2))
-
+            #model.add(tf.keras.layers.Dropout(0.2))
+            model.add(tf.keras.layers.BatchNormalization())
+            
         model.add(tf.keras.layers.Flatten())
-        model.add(tf.keras.layers.Dropout(0.2))
-        model.add(tf.keras.layers.Dense(64))
-        model.add(tf.keras.layers.Dropout(0.2))
+        #model.add(tf.keras.layers.Dropout(0.2))
+
+        #model.add(tf.keras.layers.Dropout(0.2))
         model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted))
         model.add(tf.keras.layers.Reshape([OUT_STEPS,num_features_predicted]))
 
@@ -386,6 +409,22 @@ class Model():
 
             self.load_pretrained_model()
 
+    def convlstm1d(self, OUT_STEPS, num_features_predicted, model_name, layer_number, layer_size, LoadModel=False):
+
+        model = tf.keras.Sequential()
+        
+
+        model.add(tf.keras.layers.ConvLSTM1D(16, 6, activation='tanh', recurrent_activation='hard_sigmoid', 
+                                kernel_initializer=tf.initializers.zeros(), recurrent_dropout=0.02))
+
+        model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted, activation='tanh', 
+                                kernel_initializer=tf.initializers.zeros()))
+        model.add(tf.keras.layers.Reshape([OUT_STEPS, num_features_predicted]))
+
+
+        self.model = model
+        self.model_name = model_name        
+
     def multi_linear(self, OUT_STEPS, num_features_predicted, model_name, layer_number, layer_size, LoadModel=False):
 
         model = tf.keras.Sequential()
@@ -394,8 +433,9 @@ class Model():
         model.add(tf.keras.layers.Lambda(lambda x: x[:, -1:, :]))
         # Shape => [batch, 1, out_steps*features]
         for i in range((layer_number)):
-            model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted,
+            model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted, activation='tanh', 
                                 kernel_initializer=tf.initializers.zeros()))
+           # model.add(tf.keras.layers.Dropout(0.2))
         # Shape => [batch, out_steps, features]
         model.add(tf.keras.layers.Reshape([OUT_STEPS, num_features_predicted]))
 
@@ -416,11 +456,14 @@ class Model():
         for i in range(layer_number):
             model.add(tf.keras.layers.Lambda(lambda x: x[:, -1:, :]))
             # Shape => [batch, 1, dense_units]
+
         
-            model.add(tf.keras.layers.Dense(layer_size, activation='tanh'))
+            model.add(tf.keras.layers.Dense(layer_size, activation='relu'))
+            model.add(tf.keras.layers.Dropout(0.2))
             # Shape => [batch, out_steps*features]
             model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted,
-                                  kernel_initializer=tf.initializers.zeros()))
+                                  kernel_initializer=tf.initializers.zeros(), activation='relu'))
+
             # Shape => [batch, out_steps, features]
         model.add(tf.keras.layers.Reshape([OUT_STEPS, num_features_predicted]))
 
@@ -432,19 +475,19 @@ class Model():
 
             self.load_pretrained_model()
 
-    def cnn(self, OUT_STEPS, num_features_predicted, model_name, layer_number, layer_size, LoadModel=False):
+    def cnn(self, OUT_STEPS, num_features_predicted, model_name, kernel, layer_size, LoadModel=False):
 
-        CONV_WIDTH = 3
+        CONV_WIDTH = 6
 
         model = tf.keras.Sequential()
             # Shape [batch, time, features] => [batch, CONV_WIDTH, features]
         model.add(tf.keras.layers.Lambda(lambda x: x[:, -CONV_WIDTH:, :]))
             # Shape => [batch, 1, conv_units]
-        for i in range ((layer_number)):
-                model.add(tf.keras.layers.Conv1D(
-                256, activation='tanh', kernel_size=(CONV_WIDTH)))
+
+        model.add(tf.keras.layers.Conv1D(
+                int(layer_size), activation='relu', kernel_size=(int(kernel))))
             # Shape => [batch, 1,  out_steps*features]
-                model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted,
+        model.add(tf.keras.layers.Dense(OUT_STEPS*num_features_predicted,
                                   kernel_initializer=tf.initializers.zeros()))
             # Shape => [batch, out_steps, features]
         tf.keras.layers.Reshape([OUT_STEPS, num_features_predicted])
@@ -563,7 +606,7 @@ class Model():
 
 
             self.cnn(self.OUT_STEPS, self.num_features_predicted, model_name='cnn',
-                         layer_number=parameters['layer_number'], layer_size=parameters['layer_size'])
+                         kernel=parameters['kernel'], layer_size=parameters['layer_size'])
 
             history_cnn = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                    epochs=MAX_EPOCHS,
@@ -600,20 +643,20 @@ class Model():
             history_multilinear = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                            epochs=MAX_EPOCHS,
                                                            patience=5)
-            plot_history(history_multilinear)
+           # plot_history(history_multilinear)
         if parameters['model'] == 'advanced_model':
             
 
             self.advanced_model(self.OUT_STEPS, self.num_features_predicted, model_name='advanced_model', conv_number=parameters['conv_number'],
-                              layer_number=parameters['layer_number'], layer_size=parameters['layer_size'])
-            print('learning rate ', parameters['lr'])                      
+                              layer_number=parameters['layer_number'], layer_size=parameters['layer_size'])                   
             history_advanced = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                            epochs=MAX_EPOCHS,
                                                            patience=5)
             
             plot_history(history_advanced)
+            plt.savefig('pred.png')
         # multi_window.plot_renormalized(
-        #     model=model, train_mean=train_mean, train_std=train_std)
+        # model=model, train_mean=train_mean, train_std=train_std)
 
         if parameters['model'] == 'dense':
             
@@ -622,6 +665,20 @@ class Model():
             """
 
             self.dense(self.OUT_STEPS, self.num_features_predicted, model_name='dense',
+                           layer_number=parameters['layer_number'], layer_size=parameters['layer_size'])
+            history_dense = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
+                                                     epochs=MAX_EPOCHS,
+                                                     patience=5)
+           # plot_history(history_dense)
+        # multi_window.plot_renormalized(
+        # model=model, train_mean=train_mean, train_std=train_std)
+        if parameters['model'] == 'convlstm1d':
+            
+            """
+            Define and train conv1dlstm model
+            """
+
+            self.convlstm1d(self.OUT_STEPS, self.num_features_predicted, model_name='convlstm1d',
                            layer_number=parameters['layer_number'], layer_size=parameters['layer_size'])
             history_dense = self.compile_and_fit(lr=parameters['lr'], CheckPoint=True,
                                                      epochs=MAX_EPOCHS,
@@ -636,9 +693,26 @@ class Model():
         print('prova conv', parameters['conv_number'])
         print('prova layer', parameters['layer_number'])
         return {'loss': self.multi_performance[parameters['model']][0], 'status': STATUS_OK}
+    
+    def prediction(self, parameters):
+        self.optimize_hyperparams(MAX_EPOCHS=self.max_epochs, parameters=parameters)
+        inputs, labels = self.example
+        predictions = self.model.predict(inputs)
+        predictions[0].reshape(12)
+        predictions[1].reshape(12)
+        predictions[2].reshape(12)
 
-    def finding_best(self, trial, evals, parameters):
-        return fmin(fn=self.loss, space=parameters, algo=tpe.suggest, max_evals=evals, trials=trial)
+        print('prova nodi', parameters['layer_size'])
+        print('prova lr', parameters['lr'])
+        print('prova layer', parameters['layer_number'])
+
+        return {'loss': 
+                ((np.absolute(np.array(predictions[0]-labels[0]))).mean())*25.33, 
+                'status': STATUS_OK}
+
+    def finding_best(self, trial, evals, parameters, example):
+        self.example=example
+        return fmin(fn=self.prediction, space=parameters, algo=tpe.suggest, max_evals=evals, trials=trial)
 
     def plot_opt(self, trial):
         _, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, sharey=True)
@@ -653,7 +727,7 @@ class Model():
         xs = [(t['misc']['vals']['layer_size']) for t in trial.trials]
         ys = [t['result']['loss'] for t in trial.trials]
         ax2.scatter((xs), ys, s=20, c='red', edgecolors='black')
-        ax2.set_xlabel('Layers')
+        ax2.set_xlabel('nodes')
         ax2.set_ylabel('Loss')
         ax2.grid(True)
 
@@ -663,7 +737,13 @@ class Model():
         ax3.set_xlabel('learning_rate')
         ax3.set_ylabel('Loss')
         ax3.grid(True)
+        count=0
 
+        for t in range(10):
+            if (float(ys[t])<0.7):
+                count = count+1
+
+        print('il modello risulta affidabile al ', (count/10.0)*100.0, '%')
 
         xs = [(t['misc']['vals']['layer_number']) for t in trial.trials]
         ys = [(t['result']['loss']) for t in trial.trials]
@@ -672,6 +752,8 @@ class Model():
         ax4.set_ylabel('Loss')
         ax4.grid(True)
         plt.show()
+        count=0
+
 
 
 class RepeatBaseline(tf.keras.Model):
